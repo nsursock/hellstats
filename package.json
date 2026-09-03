@@ -1,0 +1,74 @@
+{
+  "name": "hellstats",
+  "version": "1.0.0",
+  "description": "Lightweight cross-platform system monitoring dashboard",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently -n web,electron -c blue,magenta \"vite\" \"wait-on tcp:5173 && tsc && bash scripts/launch.sh\"",
+    "dev:electron": "tsc && bash scripts/launch.sh",
+    "build:web": "vite build",
+    "build": "npm run build:web && tsc && electron-builder",
+    "build:mac": "npm run build:web && tsc && electron-builder --mac",
+    "build:win": "npm run build:web && tsc && electron-builder --win",
+    "build:linux": "npm run build:web && tsc && electron-builder --linux",
+    "typecheck": "tsc --noEmit",
+    "preview": "tsc && bash scripts/launch.sh"
+  },
+  "dependencies": {
+    "@tabler/icons-svelte": "^3.46.0",
+    "gsap": "^3.12.5",
+    "systeminformation": "^5.23.5",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@types/node": "^22.20.1",
+    "@types/three": "^0.170.0",
+    "concurrently": "^9.1.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "svelte": "^5.1.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^5.4.0",
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.hellstats.app",
+    "productName": "Hellstats",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-web",
+        "to": "web"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "dir"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
+  }
+}
