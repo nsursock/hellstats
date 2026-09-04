@@ -272,21 +272,26 @@ async function getLatency(): Promise<number | null> {
 
 async function getCpuTempMacOS(): Promise<number | null> {
   if (process.platform !== "darwin") return null;
-  try {
-    const { exec } = require("child_process");
-    // Try osx-cpu-temp first (homebrew)
-    return await new Promise<number | null>((resolve) => {
-      exec("osx-cpu-temp 2>/dev/null", { timeout: 3000 }, (err: any, stdout: string) => {
-        if (err || !stdout.trim()) { resolve(null); return; }
-        const m = stdout.match(/([\d.]+)/);
-        const temp = m ? parseFloat(m[1]) : null;
-        // osx-cpu-temp returns 0.0 on Apple Silicon sometimes
-        resolve(temp && temp > 1 ? temp : null);
-      });
+  const { execFile } = require("child_process");
+  const fs = require("fs");
+  // Resolve absolute paths — apps launched from /Applications have a minimal PATH
+  // that doesn't include /opt/homebrew/bin or /usr/local/bin.
+  const candidates = [
+    "/opt/homebrew/bin/smctemp",
+    "/usr/local/bin/smctemp",
+    "/opt/homebrew/bin/osx-cpu-temp",
+    "/usr/local/bin/osx-cpu-temp",
+  ];
+  const smctemp = candidates.find((p: string) => { try { return fs.existsSync(p); } catch { return false; } });
+  if (!smctemp) return null;
+  const args = smctemp.endsWith("smctemp") ? ["-c"] : [];
+  return new Promise<number | null>((resolve) => {
+    execFile(smctemp, args, { timeout: 3000 }, (err: any, stdout: string) => {
+      if (err || !stdout.trim()) { resolve(null); return; }
+      const temp = parseFloat(stdout.trim());
+      resolve(temp > 0 && temp < 130 ? temp : null);
     });
-  } catch {
-    return null;
-  }
+  });
 }
 
 async function getThermalStateMacOS(): Promise<string> {
