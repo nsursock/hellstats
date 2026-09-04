@@ -7,7 +7,7 @@
   import Sparkline from "./lib/components/Sparkline.svelte";
   import ProcList from "./lib/components/ProcList.svelte";
   import { themeStore } from "./lib/themes.svelte";
-  import { IconCpu, IconChartLine, IconGridDots, IconTemperature, IconStack, IconComponents, IconDatabase, IconExchange, IconNetwork, IconWifi, IconAlertCircle, IconBox, IconCircleDot, IconClock, IconPalette, IconCube } from "@tabler/icons-svelte";
+  import { IconCpu, IconChartLine, IconGridDots, IconTemperature, IconStack, IconComponents, IconDatabase, IconExchange, IconNetwork, IconWifi, IconAlertCircle, IconBox, IconCircleDot, IconClock, IconPalette, IconCube, IconBolt } from "@tabler/icons-svelte";
 
   interface ProcessInfo { name: string; cpu: number; mem: number; pid: number }
   interface Metrics {
@@ -98,6 +98,36 @@
   }
 
   const api = (window as any).hellstats;
+
+  interface SpeedTestResult { downloadMbps: number | null; uploadMbps: number | null; latencyMs: number | null; timestamp: number; server?: string }
+  interface SpeedTestProgress { phase: string; downloadMbps: number | null; uploadMbps: number | null; latencyMs: number | null; progress: number }
+  let speedtest = $state<SpeedTestResult | null>(null);
+  let speedtestRunning = $state(false);
+  let speedtestProgress = $state<SpeedTestProgress | null>(null);
+
+  async function runSpeedtest() {
+    if (speedtestRunning || !api?.runSpeedtest) return;
+    speedtestRunning = true;
+    speedtestProgress = { phase: "ping", downloadMbps: null, uploadMbps: null, latencyMs: null, progress: 0 };
+    const unsub = api.onSpeedtestProgress?.((p: SpeedTestProgress) => { speedtestProgress = p; });
+    try {
+      const result: SpeedTestResult = await api.runSpeedtest();
+      if (result) speedtest = result;
+    } catch (e) {
+      console.error("[Hellstats] speedtest error:", e);
+    } finally {
+      unsub?.();
+      speedtestRunning = false;
+      speedtestProgress = null;
+    }
+  }
+
+  function fmtMbps(mbps: number | null): string {
+    if (mbps == null) return "—";
+    if (mbps >= 100) return mbps.toFixed(0);
+    if (mbps >= 10) return mbps.toFixed(1);
+    return mbps.toFixed(2);
+  }
 
   async function poll() {
     if (!api) return;
@@ -461,8 +491,56 @@
         {/snippet}
       </MetricCard>
 
+      <!-- Speed Test -->
+      <MetricCard label="Speed Test" index={9}>
+        {#snippet icon()}<IconBolt size={26} />{/snippet}
+        {#snippet children()}
+          <div class="dual-metric">
+            <div class="dual-item">
+              <span class="dual-arrow down">↓</span>
+              <span class="dual-val">{fmtMbps(speedtestProgress?.downloadMbps ?? speedtest?.downloadMbps ?? null)}</span>
+              <span class="dual-label">Mbps</span>
+            </div>
+            <div class="dual-item">
+              <span class="dual-arrow up">↑</span>
+              <span class="dual-val">{fmtMbps(speedtestProgress?.uploadMbps ?? speedtest?.uploadMbps ?? null)}</span>
+              <span class="dual-label">Mbps</span>
+            </div>
+          </div>
+          {#if speedtestRunning && speedtestProgress}
+            <div class="speedtest-progress">
+              <div class="speedtest-phase">
+                {speedtestProgress.phase === "ping" ? "🏓 Ping"
+                  : speedtestProgress.phase === "download" ? "↓ Downloading"
+                  : speedtestProgress.phase === "upload" ? "↑ Uploading"
+                  : "✓ Done"}
+                {#if speedtestProgress.latencyMs != null && speedtestProgress.phase === "ping"}
+                  <span style="margin-left:0.5rem;color:var(--color-accent-cyan);">{speedtestProgress.latencyMs.toFixed(0)}ms</span>
+                {/if}
+              </div>
+              <div class="speedtest-bar">
+                <div class="speedtest-bar-fill" style="width:{speedtestProgress.progress * 100}%;"></div>
+              </div>
+            </div>
+          {:else}
+            {#if speedtest?.latencyMs != null}
+              <div class="kv-grid" style="margin-top:0.3rem;">
+                <div class="kv"><span class="kv-k">Latency</span><span class="kv-v" style="color:{(speedtest.latencyMs ?? 0) > 100 ? 'var(--color-warning)' : 'var(--color-success)'};">{speedtest.latencyMs.toFixed(0)}ms</span></div>
+                <div class="kv"><span class="kv-k">Last run</span><span class="kv-v">{#if speedtest}{new Date(speedtest.timestamp).toLocaleTimeString()}{/if}</span></div>
+              </div>
+            {/if}
+            {#if speedtest?.server}
+              <div class="card-sub" style="margin-top:0.2rem;font-size:0.5625rem;color:var(--color-muted);">{speedtest.server}</div>
+            {/if}
+          {/if}
+          <button class="speedtest-btn" onclick={runSpeedtest} disabled={speedtestRunning}>
+            {#if speedtestRunning}{(speedtestProgress?.progress * 100).toFixed(0)}%{:else}Run Test{/if}
+          </button>
+        {/snippet}
+      </MetricCard>
+
       <!-- Network Details -->
-      <MetricCard label="Connection" index={9}>
+      <MetricCard label="Connection" index={10}>
         {#snippet icon()}<IconWifi size={26} />{/snippet}
         {#snippet children()}
           <div class="kv-grid">
@@ -497,7 +575,7 @@
       </MetricCard>
 
       <!-- Network Packets -->
-      <MetricCard label="Packets & Errors" index={10}>
+      <MetricCard label="Packets & Errors" index={11}>
         {#snippet icon()}<IconAlertCircle size={26} />{/snippet}
         {#snippet children()}
           <div class="kv-grid">
@@ -518,7 +596,7 @@
 
       <!-- GPU -->
       {#if metrics?.gpu}
-        <MetricCard label="GPU" index={11}>
+        <MetricCard label="GPU" index={12}>
         {#snippet icon()}<IconBox size={26} />{/snippet}
           {#snippet children()}
             <div class="big-metric">
@@ -553,7 +631,7 @@
 
       <!-- NPU / Neural Engine -->
       {#if metrics?.npu}
-        <MetricCard label="Neural Engine" index={14}>
+        <MetricCard label="Neural Engine" index={15}>
           {#snippet icon()}<IconComponents size={26} />{/snippet}
           {#snippet children()}
             <div class="big-metric">
@@ -591,7 +669,7 @@
       {/if}
 
       <!-- Top Processes -->
-      <MetricCard label="Top Processes" index={12}>
+      <MetricCard label="Top Processes" index={13}>
         {#snippet icon()}<IconCircleDot size={26} />{/snippet}
         {#snippet children()}
           <div class="proc-tabs">
@@ -609,7 +687,7 @@
       </MetricCard>
 
       <!-- Events -->
-      <MetricCard label="Events" index={13}>
+      <MetricCard label="Events" index={14}>
         {#snippet icon()}<IconClock size={26} />{/snippet}
         {#snippet children()}
           {#if events.length === 0}

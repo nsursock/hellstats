@@ -590,6 +590,289 @@ async function collectMetrics(): Promise<Metrics> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Speed test (Ookla CLI with streaming JSONL progress)               */
+/* ------------------------------------------------------------------ */
+
+interface SpeedTestResult {
+  downloadMbps: number | null;
+  uploadMbps: number | null;
+  latencyMs: number | null;
+  timestamp: number;
+  server?: string;
+}
+
+interface SpeedTestProgress {
+  phase: "ping" | "download" | "upload" | "done" | "error";
+  downloadMbps: number | null;
+  uploadMbps: number | null;
+  latencyMs: number | null;
+  progress: number; // 0..1
+}
+
+// Find the Ookla speedtest binary (absolute paths — apps don't inherit shell PATH)
+function findOoklaSpeedtest(): string | null {
+  const fs = require("fs");
+  const candidates = [
+    "/opt/homebrew/bin/speedtest",
+    "/usr/local/bin/speedtest",
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        // Verify it's the Ookla binary, not the python speedtest-cli
+        const { execSync } = require("child_process");
+        const out = execSync(`${p} --version 2>&1`, { timeout: 3000 }).toString();
+        if (out.includes("Ookla")) return p;
+      }
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+const OOKLA_BIN = findOoklaSpeedtest();
+
+async function runSpeedTest(sender?: any): Promise<SpeedTestResult> {
+  if (OOKLA_BIN) {
+    return runOoklaSpeedtest(sender);
+  }
+  // Fallback: networkQuality (macOS) or Cloudflare streams
+  if (process.platform === "darwin") {
+    return runNetworkQuality(sender);
+  }
+  return runCloudflareSpeedtest(sender);
+}
+
+function emitProgress(sender: any, p: SpeedTestProgress) {
+  if (sender) sender.send("speedtest:progress", p);
+}
+
+async function runOoklaSpeedtest(sender?: any): Promise<SpeedTestResult> {
+  const { spawn } = require("child_process");
+  return new Promise<SpeedTestResult>((resolve) => {
+    const args = ["--accept-license", "--accept-gdpr", "-f", "jsonl", "--progress-update-interval=500"];
+    const proc = spawn(OOKLA_BIN, args, { timeout: 60000 });
+    let result: SpeedTestResult = { downloadMbps: null, uploadMbps: null, latencyMs: null, timestamp: Date.now() };
+    let buffer = "";
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // keep incomplete line
+      for (const line of lines) {
+        if (!line.trim() || !line.startsWith("{")) continue;
+        try {
+          const evt = JSON.parse(line);
+          if (evt.type === "ping" && evt.ping) {
+            emitProgress(sender, {
+              phase: "ping", downloadMbps: null, uploadMbps: null,
+              latencyMs: evt.ping.latency ?? null, progress: evt.ping.progress ?? 0,
+            });
+          } else if (evt.type === "download" && evt.download) {
+            const mbps = evt.download.bandwidth ? (evt.download.bandwidth * 8) / 1e6 : null;
+            emitProgress(sender, {
+              phase: "download", downloadMbps: mbps, uploadMbps: null,
+              latencyMs: null, progress: evt.download.progress ?? 0,
+            });
+          } else if (evt.type === "upload" && evt.upload) {
+            const mbps = evt.upload.bandwidth ? (evt.upload.bandwidth * 8) / 1e6 : null;
+            emitProgress(sender, {
+              phase: "upload", downloadMbps: null, uploadMbps: mbps,
+              latencyMs: null, progress: evt.upload.progress ?? 0,
+            });
+          } else if (evt.type === "result") {
+            result = {
+              downloadMbps: evt.download?.bandwidth ? (evt.download.bandwidth * 8) / 1e6 : null,
+              uploadMbps: evt.upload?.bandwidth ? (evt.upload.bandwidth * 8) / 1e6 : null,
+              latencyMs: evt.ping?.latency ?? null,
+              timestamp: Date.now(),
+              server: evt.server ? `${evt.server.name} (${evt.server.location})` : undefined,
+            };
+            emitProgress(sender, {
+              phase: "done", downloadMbps: result.downloadMbps, uploadMbps: result.uploadMbps,
+              latencyMs: result.latencyMs, progress: 1,
+            });
+          }
+        } catch { /* ignore parse errors (license text, etc.) */ }
+      }
+    });
+
+    proc.on("close", () => resolve(result));
+    proc.on("error", () => resolve(result));
+  });
+}
+
+async function runNetworkQuality(sender?: any): Promise<SpeedTestResult> {
+  emitProgress(sender, { phase: "ping", downloadMbps: null, uploadMbps: null, latencyMs: null, progress: 0.1 });
+  try {
+    const { execFile } = require("child_process");
+    const output = await new Promise<string>((resolve, reject) => {
+      execFile("/usr/bin/networkQuality", ["-c", "-s"], { timeout: 60000 }, (err: any, stdout: string) => {
+        if (err) reject(err); else resolve(stdout);
+      });
+    });
+    const data = JSON.parse(output);
+    const result: SpeedTestResult = {
+      downloadMbps: data.dl_throughput ? data.dl_throughput / 1e6 : null,
+      uploadMbps: data.ul_throughput ? data.ul_throughput / 1e6 : null,
+      latencyMs: data.base_rtt ?? null,
+      timestamp: Date.now(),
+    };
+    emitProgress(sender, {
+      phase: "done", downloadMbps: result.downloadMbps, uploadMbps: result.uploadMbps,
+      latencyMs: result.latencyMs, progress: 1,
+    });
+    return result;
+  } catch {
+    return runCloudflareSpeedtest(sender);
+  }
+}
+
+// Cloudflare fallback (non-macOS or if both above fail)
+async function runCloudflareSpeedtest(sender?: any): Promise<SpeedTestResult> {
+  const SPEED_AGENT = new (require("https").Agent)({ keepAlive: true, maxSockets: 8 });
+  emitProgress(sender, { phase: "ping", downloadMbps: null, uploadMbps: null, latencyMs: null, progress: 0.1 });
+  const latencyMs = await measureLatencyCF(SPEED_AGENT);
+  emitProgress(sender, { phase: "download", downloadMbps: null, uploadMbps: null, latencyMs, progress: 0.2 });
+
+  // Stream download progress
+  const dlMbps = await measureDownloadCF(SPEED_AGENT, (mbps, progress) => {
+    emitProgress(sender, { phase: "download", downloadMbps: mbps, uploadMbps: null, latencyMs, progress: 0.2 + progress * 0.4 });
+  });
+  emitProgress(sender, { phase: "upload", downloadMbps: dlMbps, uploadMbps: null, latencyMs, progress: 0.6 });
+  const ulMbps = await measureUploadCF(SPEED_AGENT, (mbps, progress) => {
+    emitProgress(sender, { phase: "upload", downloadMbps: dlMbps, uploadMbps: mbps, latencyMs, progress: 0.6 + progress * 0.4 });
+  });
+  const result: SpeedTestResult = { downloadMbps: dlMbps, uploadMbps: ulMbps, latencyMs, timestamp: Date.now() };
+  emitProgress(sender, { phase: "done", downloadMbps: dlMbps, uploadMbps: ulMbps, latencyMs, progress: 1 });
+  return result;
+}
+
+function downloadStreamCF(bytes: number, agent: any): Promise<{ bytes: number; ms: number }> {
+  const https = require("https");
+  return new Promise<{ bytes: number; ms: number }>((resolve) => {
+    const start = process.hrtime.bigint();
+    let received = 0;
+    let settled = false;
+    const done = (bytes: number, ms: number) => { if (!settled) { settled = true; resolve({ bytes, ms }); } };
+    const req = https.get(
+      `https://speed.cloudflare.com/__down?bytes=${bytes}`,
+      { agent, timeout: 20000 },
+      (res: any) => {
+        if (res.statusCode !== 200) { res.destroy(); done(0, 0); return; }
+        res.on("data", (chunk: Buffer) => { received += chunk.length; });
+        res.on("end", () => done(received, Number(process.hrtime.bigint() - start) / 1e6));
+        res.on("error", () => done(received, Number(process.hrtime.bigint() - start) / 1e6));
+      },
+    );
+    req.on("timeout", () => { req.destroy(); done(received, Number(process.hrtime.bigint() - start) / 1e6); });
+    req.on("error", () => done(received, Number(process.hrtime.bigint() - start) / 1e6));
+  });
+}
+
+async function measureDownloadCF(agent: any, onProgress?: (mbps: number, progress: number) => void): Promise<number | null> {
+  const STREAMS = 6;
+  const BYTES = 10_000_000;
+  const start = process.hrtime.bigint();
+  let completed = 0;
+  const results = await Promise.all(
+    Array.from({ length: STREAMS }, () =>
+      downloadStreamCF(BYTES, agent).then((r) => {
+        completed++;
+        if (onProgress) {
+          const totalBytes = completed * BYTES;
+          const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
+          const mbps = elapsedSec > 0 ? (totalBytes * 8) / elapsedSec / 1e6 : 0;
+          onProgress(mbps, completed / STREAMS);
+        }
+        return r;
+      }),
+    ),
+  );
+  const totalBytes = results.reduce((sum, r) => sum + r.bytes, 0);
+  const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
+  return elapsedSec > 0 ? (totalBytes * 8) / elapsedSec / 1e6 : null;
+}
+
+function uploadStreamCF(payload: Buffer, agent: any): Promise<{ bytes: number; ms: number }> {
+  const https = require("https");
+  return new Promise<{ bytes: number; ms: number }>((resolve) => {
+    const start = process.hrtime.bigint();
+    let settled = false;
+    const done = (bytes: number, ms: number) => { if (!settled) { settled = true; resolve({ bytes, ms }); } };
+    const req = https.request(
+      "https://speed.cloudflare.com/__up",
+      {
+        method: "POST",
+        agent,
+        headers: { "Content-Type": "application/octet-stream", "Content-Length": payload.length },
+        timeout: 20000,
+      },
+      (res: any) => {
+        res.resume();
+        res.on("end", () => done(payload.length, Number(process.hrtime.bigint() - start) / 1e6));
+        res.on("error", () => done(0, Number(process.hrtime.bigint() - start) / 1e6));
+      },
+    );
+    req.on("timeout", () => { req.destroy(); done(0, Number(process.hrtime.bigint() - start) / 1e6); });
+    req.on("error", () => done(0, Number(process.hrtime.bigint() - start) / 1e6));
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function measureUploadCF(agent: any, onProgress?: (mbps: number, progress: number) => void): Promise<number | null> {
+  const STREAMS = 4;
+  const payload = Buffer.alloc(5_000_000, 0x41);
+  const start = process.hrtime.bigint();
+  let completed = 0;
+  const results = await Promise.all(
+    Array.from({ length: STREAMS }, () =>
+      uploadStreamCF(payload, agent).then((r) => {
+        completed++;
+        if (onProgress) {
+          const totalBytes = completed * payload.length;
+          const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
+          const mbps = elapsedSec > 0 ? (totalBytes * 8) / elapsedSec / 1e6 : 0;
+          onProgress(mbps, completed / STREAMS);
+        }
+        return r;
+      }),
+    ),
+  );
+  const totalBytes = results.reduce((sum, r) => sum + r.bytes, 0);
+  const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
+  return elapsedSec > 0 ? (totalBytes * 8) / elapsedSec / 1e6 : null;
+}
+
+async function measureLatencyCF(agent: any): Promise<number | null> {
+  const https = require("https");
+  await new Promise<void>((resolve) => {
+    const req = https.get("https://speed.cloudflare.com/__down?bytes=0", { agent, timeout: 5000 }, (res: any) => {
+      res.resume(); res.on("end", () => resolve()); res.on("error", () => resolve());
+    });
+    req.on("timeout", () => { req.destroy(); resolve(); });
+    req.on("error", () => resolve());
+  });
+  const samples: number[] = [];
+  for (let i = 0; i < 5; i++) {
+    const t = await new Promise<number | null>((resolve) => {
+      const start = process.hrtime.bigint();
+      const req = https.get("https://speed.cloudflare.com/__down?bytes=0", { agent, timeout: 5000 }, (res: any) => {
+        res.resume();
+        res.on("end", () => resolve(Number(process.hrtime.bigint() - start) / 1e6));
+        res.on("error", () => resolve(null));
+      });
+      req.on("timeout", () => { req.destroy(); resolve(null); });
+      req.on("error", () => resolve(null));
+    });
+    if (t != null) samples.push(t);
+  }
+  if (!samples.length) return null;
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+/* ------------------------------------------------------------------ */
 /*  IPC                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -603,6 +886,16 @@ ipcMain.handle("metrics:get", async () => {
 });
 
 ipcMain.handle("app:is-dev", () => isDev);
+
+ipcMain.handle("speedtest:run", async (_event: any) => {
+  try {
+    const sender = _event.sender;
+    return await runSpeedTest(sender);
+  } catch (e) {
+    console.error("speedtest error:", e);
+    return null;
+  }
+});
 
 /* ------------------------------------------------------------------ */
 /*  Window                                                             */

@@ -1159,6 +1159,53 @@ html, body {
   color: var(--color-accent);
 }
 
+/* Speed test button */
+.speedtest-btn {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(var(--accent-rgb), 0.12);
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  color: var(--color-accent);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.speedtest-btn:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.2);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.3);
+}
+.speedtest-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.speedtest-progress {
+  margin-top: 0.4rem;
+}
+.speedtest-phase {
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 0.2rem;
+}
+.speedtest-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(var(--accent-rgb), 0.12);
+  overflow: hidden;
+}
+.speedtest-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-secondary));
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.4);
+  transition: width 0.3s ease;
+}
+
 /* P/E core labels */
 .core-grid.pe-cores .core-cell.pe .core-label { color: var(--color-accent); }
 .core-grid.pe-cores .core-cell.e .core-label { color: var(--color-accent-cyan); }
